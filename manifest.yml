@@ -1,0 +1,120 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: config-custom-topo-${pod_hash}
+data:
+  customTopology.yaml: |-
+    name: laboratorio-kali-metasploitable
+    hosts:
+      # Máquina de ataque
+      kali-attacker:
+        ip: 192.168.0.10/24
+        defaultRoute: via 192.168.0.1
+        kind: k8spod
+        # Imagem Docker oficial do Kali Linux
+        image: kalilinux/kali-rolling
+      
+      # Máquina alvo
+      metasploitable-target:
+        ip: 192.168.0.20/24
+        defaultRoute: via 192.168.0.1
+        kind: k8spod
+        # Imagem Docker popular do Metasploitable 2
+        image: tleemcjr/metasploitable2
+        # Expõe as portas vulneráveis do Metasploitable
+        publish: ["21:21", "22:22", "23:23", "25:25", "53:53", "80:80", "111:111", "139:139", "445:445", "512:512", "513:513", "514:514", "1099:1099", "1524:1524", "2049:2049", "2121:2121", "3306:3306", "5432:5432", "5900:5900", "6000:6000", "6667:6667", "8009:8009", "8180:8180"]
+
+    switches:
+      s1:
+        kind: lxbr
+
+    links:
+      - node1: kali-attacker
+        node2: s1
+      - node1: metasploitable-target
+        node2: s1
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mininet-sec-${pod_hash}
+  labels:
+    app: mininet-sec-${pod_hash}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mininet-sec-${pod_hash}
+  template:
+    metadata:
+      name: mininet-sec-${pod_hash}
+      labels:
+        app: mininet-sec-${pod_hash}
+      annotations:
+        container.apparmor.security.beta.kubernetes.io/mininet-sec: unconfined
+    spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: kubernetes.io/hostname
+                operator: In
+                values: ${allowed_nodes}
+      containers:
+      - name: mininet-sec
+        image: hackinsdn/mininet-sec:latest
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 8050
+        args: ["mnsec", "--topofile", "/customTopology.yaml"]
+        env:
+        - name: K8S_POD_HASH
+          value: ${pod_hash}
+        - name: K8S_NODE_AFFINITY
+          value: ${allowed_nodes_str}
+        - name: K8S_PROXY_CERT_FILE
+          value: /usr/local/etc/mnsec-proxy-ca.crt
+        - name: K8S_PROXY_HOST
+          value: mnsec-proxy-service.hackinsdn.svc.cnacv5
+        securityContext:
+          capabilities:
+            add: ["NET_ADMIN", "SYS_MODULE", "SYS_ADMIN"]
+        volumeMounts:
+        - name: lib-modules
+          mountPath: /lib/modules
+        - name: config-custom-topo-${pod_hash}-volume
+          readOnly: true
+          mountPath: "/customTopology.yaml"
+          subPath: "customTopology.yaml"
+        - name: mnsec-proxy-ca-volume
+          mountPath: /usr/local/etc/mnsec-proxy-ca.crt
+          readOnly: true
+          subPath: ca.crt
+      volumes:
+      - name: lib-modules
+        hostPath:
+          path: /lib/modules
+          type: Directory
+      - name: config-custom-topo-${pod_hash}-volume
+        configMap:
+          name: config-custom-topo-${pod_hash}
+      - name: mnsec-proxy-ca-volume
+        configMap:
+          defaultMode: 0600
+          name: mnsec-proxy-ca-configmap
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mininet-sec-${pod_hash}
+  labels:
+    app: mininet-sec-${pod_hash}
+spec:
+  type: NodePort
+  ports:
+  - port: 8050
+    targetPort: 8050
+    name: http-mininet-sec
+  selector:
+    app: mininet-sec-${pod_hash}
